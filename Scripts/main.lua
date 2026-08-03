@@ -199,7 +199,11 @@ local function adopt(t)
     -- multiply can only ever REMOVE light, so a saturated colour always lands
     -- dark. oklch picks the target in a perceptual space at the base's own
     -- lightness and solves for the multiplier that reaches it.
-    MODE      = (t.mode or "multiply"):lower()
+    -- oklch is the default: multiply can only ever remove light, so it makes
+    -- every saturated colour land dark and pushes the work onto `intensity`.
+    -- An ini written by an older build has no mode= line, so it lands here
+    -- too -- deliberately, since the whole point is that it looks better.
+    MODE      = (t.mode or "oklch"):lower()
     HUE       = tonumber(t.hue) or 0.0
     CHROMA    = tonumber(t.chroma) or 0.15
     LIGHTNESS = tonumber(t.lightness) or 1.0
