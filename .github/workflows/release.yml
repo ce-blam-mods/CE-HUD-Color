@@ -1,0 +1,129 @@
+name: Release
+
+# Tag-driven: `git tag v1.0.0 && git push --tags` builds and publishes.
+# workflow_dispatch produces the same zip as an artifact without cutting a
+# release -- useful for handing someone a test build.
+on:
+  push:
+    tags:
+      - "v*"
+  # No version input on purpose: the version has exactly one source, MOD_VERSION
+  # in Scripts/main.lua. A dispatch run builds that version and publishes
+  # nothing.
+  workflow_dispatch:
+  # Not a release, just a guard: keep the suite green on anything that can
+  # change behaviour.
+  pull_request:
+    paths:
+      - "Scripts/**"
+      - "settings.ini"
+      - "tools/modtest/**"
+      - ".github/workflows/release.yml"
+
+permissions:
+  contents: write        # required to create the release
+
+env:
+  MOD_NAME: CEHudColor
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # lupa embeds a Lua runtime; the suite runs the SHIPPED Scripts/main.lua
+      # against a synthetic UE4SS world, so a green run is a statement about the
+      # exact file being zipped rather than about a copy of it.
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip lupa
+
+      - name: Run the mod test suite
+        run: python tools/modtest/run_tests.py cehudcolor
+
+      # The version lives in exactly one place -- MOD_VERSION in main.lua, which
+      # is what the mod prints to UE4SS.log on load. A tag that disagrees with it
+      # would ship a release whose banner names a different version than its
+      # download, so that mismatch is a hard failure rather than a warning.
+      - name: Resolve version and check it matches the tag
+        id: version
+        run: |
+          set -euo pipefail
+          FILE="Scripts/main.lua"
+          SRC_VERSION="$(sed -n 's/^local MOD_VERSION = "\([^"]*\)".*/\1/p' "$FILE" | head -1)"
+          if [ -z "$SRC_VERSION" ]; then
+            echo "::error file=$FILE::MOD_VERSION not found - the release workflow parses it from this file"
+            exit 1
+          fi
+          echo "main.lua declares version $SRC_VERSION"
+
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [ "$TAG_VERSION" != "$SRC_VERSION" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match MOD_VERSION ${SRC_VERSION} in ${FILE}."
+              echo "::error::Bump MOD_VERSION (or retag) so the release and its in-game banner agree."
+              exit 1
+            fi
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$SRC_VERSION" >> "$GITHUB_OUTPUT"
+
+      # The repo root IS the mod folder, but the zip needs the folder itself as
+      # its top-level entry so it unpacks straight into ue4ss/Mods/. So the
+      # payload is staged into a directory named after the mod, and only the
+      # install payload goes in: screenshots are documentation and would roughly
+      # triple the download, and the test harness is not something users run.
+      - name: Stage the mod folder
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/staging/$MOD_NAME"
+          cp -r Scripts "dist/staging/$MOD_NAME/"
+          cp settings.ini README.md LICENSE "dist/staging/$MOD_NAME/"
+          echo "--- zip contents ---"
+          find "dist/staging/$MOD_NAME" -type f | sort
+
+      - name: Build the zip
+        id: zip
+        run: |
+          set -euo pipefail
+          NAME="${MOD_NAME}-v${{ steps.version.outputs.version }}.zip"
+          (cd dist/staging && zip -r "../$NAME" "$MOD_NAME")
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "path=dist/$NAME" >> "$GITHUB_OUTPUT"
+
+      # Uploaded on every run, including pull requests, so a build is always
+      # downloadable even when nothing is published.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.zip.outputs.name }}
+          path: ${{ steps.zip.outputs.path }}
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: steps.version.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ${{ steps.zip.outputs.path }}
+          name: CE HUD Color v${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          body: |
+            **Install**
+
+            1. Unzip into `<game>\Meteorite\Binaries\Win64\ue4ss\Mods\` so you
+               end up with `ue4ss\Mods\CEHudColor\Scripts\main.lua`.
+            2. Add `CEHudColor : 1` to `ue4ss\Mods\mods.txt`.
+
+            `mods.txt` rather than an `enabled.txt`: UE4SS starts enabled.txt
+            mods in a second pass its own log calls *"no defined load order"*,
+            and load order decides who wins if another HUD mod also paints the
+            ammo counters.
+
+            **Hotkeys** — `Ctrl+Shift+J`/`U` cycle colours, `O`/`I` brighten and
+            dim, `M` toggles, `R` re-reads `settings.ini` live, `G` reports what
+            it can see. All rebindable in `settings.ini`.

@@ -1,0 +1,10 @@
+# release staging (the workflow builds into here)
+/dist/
+
+# python
+__pycache__/
+*.py[cod]
+
+# the mod rewrites its own settings on every hotkey press; the file in the repo
+# is the shipped default, so keep local experiments out of commits with:
+#   git update-index --skip-worktree settings.ini

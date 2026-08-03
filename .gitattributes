@@ -1,0 +1,12 @@
+# The workflow's `run:` blocks are bash. If these files ever land in the repo
+# with CRLF, the Linux runner fails on stray \r -- so pin them to LF regardless
+# of anyone's core.autocrlf setting.
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.lua   text eol=lf
+*.py    text eol=lf
+*.ini   text eol=lf
+*.md    text eol=lf
+
+*.jpg   binary
+*.png   binary
