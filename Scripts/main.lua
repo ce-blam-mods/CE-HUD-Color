@@ -41,7 +41,7 @@
 local MOD_NAME = "CEHudColor"
 -- Single source of truth for the version: the release workflow parses this
 -- line and refuses to build if the git tag disagrees with it.
-local MOD_VERSION = "1.0.0"
+local MOD_VERSION = "1.1.0"
 local ENFORCE_INTERVAL_MS = 1000
 local RESCAN_EVERY_PASSES = 3      -- full FindAllOf every ~3s; re-tint every pass
 local HUD_PATH = "/game/ui/hud/"
@@ -165,6 +165,7 @@ local INTENSITY_MIN, INTENSITY_MAX, INTENSITY_STEP = 0.20, 4.00, 0.10
 -- callbacks rather than replace them.
 local ENABLED, INTENSITY, TARGETS, TINT_RETICLE
 local CUSTOM_COLOR, preset_index
+local MODE, HUE, CHROMA, LIGHTNESS, BASE_COLOR
 
 -- PER-ELEMENT OVERRIDES. Any target key can be given its own colour and/or its
 -- own intensity by prefixing it:
@@ -180,6 +181,7 @@ local CUSTOM_COLOR, preset_index
 -- start from the same base brightness, so the same colour can need a different
 -- push on the radar than it does on the shield bar.
 local OVERRIDE_COLOR, OVERRIDE_INTENSITY, OVERRIDE_KEYS
+local OVERRIDE_HUE, OVERRIDE_CHROMA, OVERRIDE_LIGHT
 
 local function adopt(t)
     ENABLED   = bool_val(t.enabled, true)
@@ -193,21 +195,44 @@ local function adopt(t)
     CUSTOM_COLOR = parse_custom(t.color)
     preset_index = find_preset(t.color) or (CUSTOM_COLOR and 0) or find_preset("green") or 1
 
+    -- OKLCH MODE. See the OKLCH section below for why this exists; in short,
+    -- multiply can only ever REMOVE light, so a saturated colour always lands
+    -- dark. oklch picks the target in a perceptual space at the base's own
+    -- lightness and solves for the multiplier that reaches it.
+    MODE      = (t.mode or "multiply"):lower()
+    HUE       = tonumber(t.hue) or 0.0
+    CHROMA    = tonumber(t.chroma) or 0.15
+    LIGHTNESS = tonumber(t.lightness) or 1.0
+    -- Measured off a stock-HUD capture: the HUD is very nearly WHITE, not the
+    -- saturated cyan it reads as. That is exactly why a literal hue ROTATION of
+    -- it would be a no-op (near-zero chroma to rotate) and why the target is
+    -- built from hue+chroma directly instead.
+    BASE_COLOR = parse_custom(t.base_color) or { r = 0.889, g = 0.990, b = 1.000 }
+
     OVERRIDE_COLOR, OVERRIDE_INTENSITY, OVERRIDE_KEYS = {}, {}, {}
+    OVERRIDE_HUE, OVERRIDE_CHROMA, OVERRIDE_LIGHT = {}, {}, {}
     local seen = {}
+    local function mark(k) if not seen[k] then seen[k] = true end end
+    local NUMERIC = {
+        intensity_ = OVERRIDE_INTENSITY, hue_ = OVERRIDE_HUE,
+        chroma_    = OVERRIDE_CHROMA,    lightness_ = OVERRIDE_LIGHT,
+    }
     for k, v in pairs(t) do
-        -- "color_" / "intensity_" are prefixes, so guard against the bare
-        -- "color" and "intensity" keys sneaking in as an override named "".
+        -- These are all PREFIXES, so guard against the bare "color"/"intensity"
+        -- keys sneaking in as an override named "", and against "base_color"
+        -- (the global base) being read as an override for an element named
+        -- "color".
         local ck = k:match("^color_(.+)$")
-        local ik = k:match("^intensity_(.+)$")
         if ck and #ck > 0 then
             OVERRIDE_COLOR[ck:lower()] = v
-            if not seen[ck:lower()] then seen[ck:lower()] = true end
-        elseif ik and #ik > 0 then
-            local n = tonumber(v)
-            if n then
-                OVERRIDE_INTENSITY[ik:lower()] = n
-                if not seen[ik:lower()] then seen[ik:lower()] = true end
+            mark(ck:lower())
+        else
+            for prefix, tbl in pairs(NUMERIC) do
+                local nk = k:match("^" .. prefix .. "(.+)$")
+                if nk and #nk > 0 then
+                    local n = tonumber(v)
+                    if n then tbl[nk:lower()] = n; mark(nk:lower()) end
+                end
             end
         end
     end
@@ -259,10 +284,81 @@ end
 
 local IDENTITY = { R = 1.0, G = 1.0, B = 1.0, A = 1.0 }
 
+--------------------------------------------------------------------
+--  OKLCH MODE
+--
+--  The engine gives exactly ONE lever: ColorAndOpacity, a per-channel
+--  multiply. Multiply can only ever remove light, so asking for red over a
+--  near-white HUD gives dark red -- which is the whole reason `intensity`
+--  exists, and why red needs it cranked to ~2.5 by hand.
+--
+--  But a multiply is invertible for a KNOWN source colour: to land a base S on
+--  any target T, use M = T / S. So this mode picks T properly -- in OkLab,
+--  where lightness is perceptual and independent of hue -- and then solves for
+--  the multiplier that gets there. Every hue then comes out at the SAME
+--  perceived lightness with no manual compensation, and channels that need to
+--  go above 1.0 do so on their own.
+--
+--  The catch, stated plainly: one multiplier applies to a whole widget subtree,
+--  so it is exact only for pixels actually drawn in the base colour. The HUD is
+--  near-monochrome, so that covers nearly all of it -- but a radar contact blip
+--  or a red damage flash is NOT the base colour and will not land on the target
+--  hue. That is a property of the engine's only lever, not of this maths.
+--------------------------------------------------------------------
+
+local BASE_FLOOR = 0.02   -- keeps M finite when a base channel is ~0
+local MULT_MAX   = 8.0    -- a runaway multiplier would blow out to pure white
+
+local function cbrt(x)
+    if x < 0 then return -((-x) ^ (1 / 3)) end
+    return x ^ (1 / 3)
+end
+
+local function linear_to_oklab(r, g, b)
+    local l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+    local m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+    local s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+    local l_, m_, s_ = cbrt(l), cbrt(m), cbrt(s)
+    return 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+           1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+           0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_
+end
+
+local function oklab_to_linear(L, a, b)
+    local l_ = L + 0.3963377774 * a + 0.2158037573 * b
+    local m_ = L - 0.1055613458 * a - 0.0638541728 * b
+    local s_ = L - 0.0894841775 * a - 1.2914855480 * b
+    local l, m, s = l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_
+    return  4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+           -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+           -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+end
+
+local function oklch_color(key)
+    local base   = BASE_COLOR
+    local hue    = (key and OVERRIDE_HUE[key])    or HUE
+    local chroma = (key and OVERRIDE_CHROMA[key]) or CHROMA
+    local lmul   = (key and OVERRIDE_LIGHT[key])  or LIGHTNESS
+
+    local L = (linear_to_oklab(base.r, base.g, base.b)) * lmul
+    local h = math.rad(hue)
+    local tr, tg, tb = oklab_to_linear(L, chroma * math.cos(h), chroma * math.sin(h))
+
+    local function solve(t, sbase)
+        if t < 0 then t = 0 end        -- target fell outside the gamut
+        local m = t / math.max(sbase, BASE_FLOOR)
+        if m > MULT_MAX then m = MULT_MAX end
+        if m < 0 then m = 0 end
+        return m
+    end
+    return { R = solve(tr, base.r), G = solve(tg, base.g), B = solve(tb, base.b), A = 1.0 }
+end
+
 -- The colour ONE element should end up with: its own override if it has one,
 -- otherwise the global colour. Colour and intensity resolve independently, so
 -- "same colour as everything else, just brighter" is a one-line override.
 local function color_for(key)
+    if MODE == "oklch" then return oklch_color(key) end
     local spec = key and OVERRIDE_COLOR[key]
     local p
     if spec and #spec > 0 then
@@ -298,8 +394,16 @@ local function write_settings()
     f:write(table.concat(names, ", ") .. ") or a literal \"r,g,b\".\n")
     f:write("# intensity: multiplier; above 1.0 brightens (the tint is a multiply).\n")
     f:write("enabled=" .. tostring(ENABLED) .. "\n")
+    f:write("mode=" .. MODE .. "\n")
     f:write("color=" .. col .. "\n")
     f:write(string.format("intensity=%.2f\n", INTENSITY))
+    f:write("# oklch mode: hue in degrees, chroma ~0-0.35, lightness is a\n")
+    f:write("# multiplier on the HUD's own perceived lightness.\n")
+    f:write(string.format("hue=%.1f\n", HUE))
+    f:write(string.format("chroma=%.3f\n", CHROMA))
+    f:write(string.format("lightness=%.2f\n", LIGHTNESS))
+    f:write(string.format("base_color=%.3f,%.3f,%.3f\n",
+        BASE_COLOR.r, BASE_COLOR.g, BASE_COLOR.b))
     f:write("targets=" .. table.concat(TARGETS, ",") .. "\n")
     f:write("tint_reticle=" .. tostring(TINT_RETICLE) .. "\n")
     f:write("tint_text=" .. tostring(TINT_TEXT) .. "\n")
@@ -311,6 +415,15 @@ local function write_settings()
             end
             if OVERRIDE_INTENSITY[key] then
                 f:write(string.format("intensity_%s=%.2f\n", key, OVERRIDE_INTENSITY[key]))
+            end
+            if OVERRIDE_HUE[key] then
+                f:write(string.format("hue_%s=%.1f\n", key, OVERRIDE_HUE[key]))
+            end
+            if OVERRIDE_CHROMA[key] then
+                f:write(string.format("chroma_%s=%.3f\n", key, OVERRIDE_CHROMA[key]))
+            end
+            if OVERRIDE_LIGHT[key] then
+                f:write(string.format("lightness_%s=%.2f\n", key, OVERRIDE_LIGHT[key]))
             end
         end
     end
@@ -565,6 +678,13 @@ local function bind(action, fn)
 end
 
 local function announce()
+    if MODE == "oklch" then
+        local c = oklch_color(nil)
+        log(string.format("oklch: hue %.0f deg  chroma %.3f  lightness %.2f"
+            .. "  -> multiplier %.2f,%.2f,%.2f  %s",
+            HUE, CHROMA, LIGHTNESS, c.R, c.G, c.B, ENABLED and "ON" or "OFF"))
+        return
+    end
     local c, name = current_color()
     log(string.format("colour = %s  (%.2f, %.2f, %.2f)  intensity %.2f  %s",
         name, c.R, c.G, c.B, INTENSITY, ENABLED and "ON" or "OFF"))
@@ -585,7 +705,18 @@ local function refresh()
     save()
 end
 
+local HUE_STEP = 15.0
+
 local function cycle(delta)
+    -- In oklch mode the same keys rotate the hue instead of stepping presets:
+    -- a preset list is a multiply-mode idea, and rebinding a second pair of
+    -- keys for the same intent would just be more to remember.
+    if MODE == "oklch" then
+        HUE = (HUE + delta * HUE_STEP) % 360
+        ENABLED = true
+        refresh()
+        return
+    end
     CUSTOM_COLOR = nil            -- stepping through presets drops a custom colour
     if preset_index == 0 then preset_index = 1 end
     preset_index = preset_index + delta
@@ -599,6 +730,16 @@ bind("key_next", function() cycle(1) end)
 bind("key_prev", function() cycle(-1) end)
 
 local function step_intensity(d)
+    if MODE == "oklch" then
+        -- lightness is a multiplier on the HUD's own perceived lightness, so
+        -- the same step size reads as a much bigger change than intensity does
+        LIGHTNESS = LIGHTNESS + d * 0.5
+        if LIGHTNESS < 0.20 then LIGHTNESS = 0.20 end
+        if LIGHTNESS > 2.00 then LIGHTNESS = 2.00 end
+        ENABLED = true
+        refresh()
+        return
+    end
     INTENSITY = INTENSITY + d
     if INTENSITY < INTENSITY_MIN then INTENSITY = INTENSITY_MIN end
     if INTENSITY > INTENSITY_MAX then INTENSITY = INTENSITY_MAX end

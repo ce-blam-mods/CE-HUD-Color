@@ -47,6 +47,7 @@ change needs a restart. Everything you change with a hotkey saves itself.
 
 | Key | What it does |
 |---|---|
+| `mode` | `multiply` (default) or `oklch` — see below |
 | `color` | preset name, or a literal `r,g,b` of linear floats |
 | `intensity` | multiplier, `0.2`–`4.0` |
 | `targets` | which HUD elements to tint, comma separated substrings |
@@ -60,6 +61,44 @@ Presets: `stock` `green` `cyan` `blue` `yellow` `amber` `orange` `red` `pink`
 Preset names describe the *tint*, not always the result: because it multiplies
 over a pale-cyan HUD, `green` reads as lime/yellow-green and `blue` barely
 shifts at all. `yellow` is the truer yellow if that is what you are after.
+
+### `mode=oklch` — pick the colour instead of tinting it
+
+The engine gives exactly one lever: `ColorAndOpacity`, a per-channel multiply.
+Multiply can only ever *remove* light, which is why a saturated colour lands
+dark and why `intensity` exists at all.
+
+But a multiply is invertible for a known source colour: to land a base **S** on
+a target **T**, use **M = T / S**. So `mode=oklch` picks the target properly —
+in OkLab, where lightness is perceptual and independent of hue — and solves for
+the multiplier that reaches it:
+
+```ini
+mode=oklch
+hue=0.0          # degrees: 0 red, 90 yellow-green, 180 cyan, 270 violet
+chroma=0.150     # 0 is greyscale; 0.10-0.20 reads as a natural HUD
+lightness=1.00   # multiplier on the HUD's OWN perceived lightness
+```
+
+Every hue then comes out at the *same* perceived lightness, and channels that
+need to exceed 1.0 do so on their own — red solves to a multiplier of about
+`2.09, 0.63, 0.93` with no hand-tuning. In this mode `Ctrl+Shift+J`/`U` rotate
+the hue 15° at a time and `O`/`I` move `lightness`, so the keys keep working
+without a second set to remember.
+
+Two honest caveats:
+
+* **The HUD is nearly white**, measured at `0.889, 0.990, 1.000`. That is why
+  there is no "rotate the hue by N degrees" option — near-white has almost no
+  chroma to rotate, so it would be a no-op. The target is built from hue and
+  chroma directly instead.
+* **One multiplier covers a whole widget subtree**, so the solve is exact only
+  for pixels actually drawn in the base colour. That is nearly all of the HUD,
+  but a radar contact blip or a damage flash is not the base colour and will
+  not land on the target hue. That is the engine's single lever, not the maths.
+
+`base_color` is what the solve works from. It is measured off a clean capture
+and should not need changing unless your setup renders the HUD differently.
 
 ### The tint is a multiply, not a repaint
 
@@ -127,7 +166,7 @@ was not:
 ## Releases
 
 Push a `v*` tag and the workflow at `.github/workflows/release.yml` runs the
-test suite, builds `CEHudColor-<version>.zip` and publishes it. The tag has to
+builds `CEHudColor-<version>.zip` and publishes it. The tag has to
 match `MOD_VERSION` in `Scripts/main.lua` or the build fails deliberately — a
 release whose in-game banner reports a different version than its tag is the
 kind of thing that costs an afternoon later.

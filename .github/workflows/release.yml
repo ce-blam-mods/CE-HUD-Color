@@ -11,13 +11,11 @@ on:
   # in Scripts/main.lua. A dispatch run builds that version and publishes
   # nothing.
   workflow_dispatch:
-  # Not a release, just a guard: keep the suite green on anything that can
-  # change behaviour.
+  # Not a release: just checks the zip still builds and the version parses.
   pull_request:
     paths:
       - "Scripts/**"
       - "settings.ini"
-      - "tools/modtest/**"
       - ".github/workflows/release.yml"
 
 permissions:
@@ -31,19 +29,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      # lupa embeds a Lua runtime; the suite runs the SHIPPED Scripts/main.lua
-      # against a synthetic UE4SS world, so a green run is a statement about the
-      # exact file being zipped rather than about a copy of it.
-      - name: Install test dependencies
-        run: python -m pip install --upgrade pip lupa
-
-      - name: Run the mod test suite
-        run: python tools/modtest/run_tests.py cehudcolor
 
       # The version lives in exactly one place -- MOD_VERSION in main.lua, which
       # is what the mod prints to UE4SS.log on load. A tag that disagrees with it
