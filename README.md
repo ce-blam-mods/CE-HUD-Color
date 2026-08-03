@@ -47,7 +47,7 @@ change needs a restart. Everything you change with a hotkey saves itself.
 
 | Key | What it does |
 |---|---|
-| `mode` | `multiply` (default) or `oklch` — see below |
+| `mode` | `oklch` (default) or `multiply` — see below |
 | `color` | preset name, or a literal `r,g,b` of linear floats |
 | `intensity` | multiplier, `0.2`–`4.0` |
 | `targets` | which HUD elements to tint, comma separated substrings |
@@ -62,11 +62,12 @@ Preset names describe the *tint*, not always the result: because it multiplies
 over a pale-cyan HUD, `green` reads as lime/yellow-green and `blue` barely
 shifts at all. `yellow` is the truer yellow if that is what you are after.
 
-### `mode=oklch` — pick the colour instead of tinting it
+### `mode=oklch` — pick the colour instead of tinting it *(default)*
 
 The engine gives exactly one lever: `ColorAndOpacity`, a per-channel multiply.
 Multiply can only ever *remove* light, which is why a saturated colour lands
-dark and why `intensity` exists at all.
+dark and why `intensity` exists at all. That is the reason this is the default
+rather than the opt-in.
 
 But a multiply is invertible for a known source colour: to land a base **S** on
 a target **T**, use **M = T / S**. So `mode=oklch` picks the target properly —
@@ -100,14 +101,18 @@ Two honest caveats:
 `base_color` is what the solve works from. It is measured off a clean capture
 and should not need changing unless your setup renders the HUD differently.
 
-### The tint is a multiply, not a repaint
+### `mode=multiply` — the original behaviour
 
-`ColorAndOpacity` multiplies into what the widget draws. The stock HUD is
-already a pale cyan, so a saturated colour lands *dark* — there is little red in
-the source pixels for a red tint to keep. That is what `intensity` is for:
+`ColorAndOpacity` multiplies into what the widget draws. Because multiply only
+removes light, a saturated colour lands *dark* — there is little red in the
+source pixels for a red tint to keep. `intensity` is the manual compensation:
 values above 1.0 are legal in a linear colour and push the result back up.
 Expect to want `1.5`–`2.5` for red, orange and purple; green and cyan are close
 to the source and need little or none.
+
+This is what `color`, `intensity` and the preset list drive. Set
+`mode=multiply` if you preferred it, or want a preset by name rather than a
+hue angle.
 
 ### Per-element colours
 
